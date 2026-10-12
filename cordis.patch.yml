@@ -1,0 +1,7 @@
+# The session-delete bundle: one Host row (the Session deletion Service the
+# Gateway exposes as `sessionDelete/delete`) plus the Client half that renders
+# the sidebar row and its confirmation dialog. The Client module is registered
+# by the `dsh.client` declaration in package.json.
+- insert:
+    - id: session-delete
+      name: '@local/dsh-session-delete'

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Delete session",
+    "description": "Permanently delete one Session from the sidebar session menu: removes its log, archive/pin state, and workspace accounting."
+  }
+}
