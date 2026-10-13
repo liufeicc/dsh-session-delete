@@ -10,6 +10,12 @@
 - 在每个会话的“…”菜单中加入一行 `sidebar.workspaces.session.menu.item`
   （`id: session-delete`，order 500，紧随随附的 `archive` 行之后）。
 - 一个 `shell.overlay` 确认对话框，其中点名该会话，因为此操作不可撤销。
+- 一个 `sessionDeleteUi` **客户端服务**（`ctx.provide`），让别的客户端插件可以借用
+  这扇确认框来删除会话，而不是重写一遍。第一个调用方是 `dsh-split-workspaces` ——
+  它的窗格会话下拉在每一行会话末尾放了一个删除按钮。服务只有一个方法：
+  `request({ sessionId, displayTitle, onDeleted })`；`sessionId` 不可用时返回 `false`，
+  删除成功（或那个会话本来就没了）之后调用 `onDeleted(sessionId)`，平铺面板正是靠它
+  把钉着这个会话的窗格一起松手。
 - 一个 Host 操作，通过 Typert Gateway 以 Remote 端点 `sessionDelete/delete`
   暴露给浏览器。
 
@@ -34,6 +40,9 @@
   用户自己执行停止时的同样方式被取消，并在 Agent 归于静默后继续执行删除，
   因此不会有在途的 drain 重新创建正在被删除的那个文件。
 - 已经消失的会话会以 `missing` 收场；对话框将其视为已完成，并清除那条过期的行。
+- 通过 `sessionDeleteUi` 进来的调用方，是在客户端会话列表**已经**被告知这次移除之后
+  才收到通知的；回调抛错只记日志，不算这次删除失败 —— 那时日志已经删掉了，把回调的
+  错误报成「删除失败」是误报。
 
 ## 说明与限制
 
@@ -63,7 +72,8 @@
 
 - `index.js` —— Host 半侧：删除操作、它做出的各种拒绝，以及手写的 Remote
   绑定。
-- `client.js` —— 客户端半侧：菜单行、确认对话框、Remote 挂载。
+- `client.js` —— 客户端半侧：菜单行、确认对话框、`sessionDeleteUi` 服务入口、
+  Remote 挂载。
 - `cordis.patch.yml` —— 插入唯一一条 Host 行。
 - `locale/{en,zh}.json` —— 插件管理器显示元数据。
 - `icon.svg` —— 插件管理器图标。
@@ -80,7 +90,9 @@
   **真实**的客户端 Gateway 上（传输层为桩），断言该命名空间对 `ctx.get` 可见，
   且调用以 `sessionDelete/delete` 的形式、携带 `request.sessionId` 与
   `request.stopActivity` 到达线上。它还包含一个反向对照（negative control），
-  证明注册表会拒绝没有 schema 工厂的严格编解码器。
+  证明注册表会拒绝没有 schema 工厂的严格编解码器。此外它会像兄弟插件那样驱动
+  `sessionDeleteUi`：空请求被拒、真请求被受理、用那个存储渲染出对话框、按下它的
+  破坏性按钮，并断言这次 Host 调用与 `onDeleted` 通知都发生了。
 - `node test/host-endpoint.mjs` —— 用**真实**的 Host Gateway 的 `invoke()`
   驱动真实注册表，从而在普通、缺失、拒绝运行和停止并删除四种情形下走通手写的
   SRC 发现路径，并真正删除会话日志目录。

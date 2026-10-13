@@ -13,6 +13,11 @@
  *      through `ctx.get` and one call reaches the wire as
  *      `sessionDelete/delete` with `{ request: { sessionId } }`.
  *
+ * It also drives the `sessionDeleteUi` Client service the same way a sibling
+ * plugin does — publish, refuse an empty request, accept a real one, render the
+ * dialog from the store it wrote, press the destructive button — so the tiled
+ * panel's dropdown cannot silently stop reaching this dialog.
+ *
  *   node test/client-mount.mjs
  *
  * Stage 1 and 2 need the installed Harness to resolve `@deepseek-ai/*`; when it
@@ -72,22 +77,32 @@ const ReactStub = {
 function createStubContext() {
   const contributions = [];
   const registered = [];
+  /** Services published through `ctx.provide`, read back the way a sibling plugin would. */
+  const provided = new Map();
+  /** `ctx.get` answers, so the deletion path can be driven without a Host. */
+  const services = new Map();
   const ctx = {
     effect: (callback) => {
       const dispose = callback();
       return typeof dispose === 'function' ? dispose : () => {};
+    },
+    provide: (name, value) => {
+      provided.set(name, value);
+      return () => {
+        provided.delete(name);
+      };
     },
     locale: { register: () => () => {}, bind: () => (key) => key },
     slots: {
       inject: (_key, callback) => {
         callback();
       },
-      register: (definition) => {
-        registered.push(definition);
+      register: (definition, component) => {
+        registered.push({ ...definition, component });
         return () => {};
       },
     },
-    get: () => undefined,
+    get: (key) => services.get(key),
     remote: {
       $mount: (contribution) => {
         contributions.push(contribution);
@@ -95,7 +110,7 @@ function createStubContext() {
       },
     },
   };
-  return { ctx, contributions, registered };
+  return { ctx, contributions, registered, provided, services };
 }
 
 const mod = await loadClientBundle(join(here, '..', 'client.js'), (id) => {
@@ -106,7 +121,7 @@ const mod = await loadClientBundle(join(here, '..', 'client.js'), (id) => {
 check('client.js returns inject and apply', typeof mod.apply === 'function' && Array.isArray(mod.inject));
 check('the Client half declares the remote service', mod.inject.includes('remote') && mod.inject.includes('slots') && mod.inject.includes('locale'));
 
-const { ctx, contributions, registered } = createStubContext();
+const { ctx, contributions, registered, provided, services } = createStubContext();
 mod.apply(ctx);
 await Promise.resolve();
 
@@ -121,6 +136,62 @@ check('the result rides SRC JSON', descriptor.result.mode === 'src-json');
 check('the menu row is registered in sidebar.workspaces.session.menu.item', registered.some((definition) => definition.name === 'sidebar.workspaces.session.menu.item' && definition.id === 'session-delete'));
 check('the confirmation dialog is registered in shell.overlay', registered.some((definition) => definition.name === 'shell.overlay' && definition.id === 'session-delete.confirm'));
 check('exactly two slot registrations were made', registered.length === 2);
+
+/*
+ * The dialog is also a service: another Client plugin (today the tiled panel's
+ * session dropdown) asks for a deletion instead of re-implementing the
+ * confirmation and the "stop it first" branch. These checks drive that entry
+ * point with no browser: publish → refuse/accept → the dialog's own props see
+ * exactly the request that was handed in → confirming calls the Host namespace
+ * and notifies the caller through `onDeleted`.
+ */
+const dialog = provided.get('sessionDeleteUi');
+check('the dialog is published as the sessionDeleteUi Client service', dialog !== undefined && typeof dialog.request === 'function');
+check('a request without a usable sessionId is refused', dialog.request({ sessionId: '' }) === false && dialog.request({}) === false);
+
+const overlay = registered.find((definition) => definition.id === 'session-delete.confirm');
+/** The dialog's own props, including the pending-deletion store it renders from. */
+const dialogProps = () => ({ ...overlay.inject(), t: ctx.locale.bind('session-delete') });
+/** Depth-first search of the rendered stand-in tree. */
+const findAll = (node, predicate, found = []) => {
+  if (node === null || node === undefined || typeof node !== 'object') return found;
+  if (Array.isArray(node)) {
+    for (const child of node) findAll(child, predicate, found);
+    return found;
+  }
+  if (node.type !== undefined && predicate(node)) found.push(node);
+  for (const child of node.children ?? []) findAll(child, predicate, found);
+  return found;
+};
+
+const deleteCalls = [];
+let notified = null;
+services.set('remote.sessionDelete', {
+  delete: (request) => {
+    deleteCalls.push(request);
+    return Promise.resolve({ ok: true, value: { deleted: true, sessionId: request.sessionId } });
+  },
+});
+check('an accepted request stores the caller, the title and the callback', dialog.request({
+  sessionId: 'session-from-pane',
+  displayTitle: '平铺窗格里的会话',
+  onDeleted: (sessionId) => {
+    notified = sessionId;
+  },
+}) === true);
+const pending = dialogProps().requestStore.getSnapshot();
+check('the pending deletion carries the requested session and title', pending.sessionId === 'session-from-pane' && pending.displayTitle === '平铺窗格里的会话');
+check('the pending deletion carries the caller callback', typeof pending.onDeleted === 'function');
+
+// Mount the dialog the way React would, then press its confirm button.
+const tree = overlay.component({ ...dialogProps(), requestStore: dialogProps().requestStore });
+const confirm = findAll(tree, (node) => typeof node.props.className === 'string' && node.props.className.includes('dshSessionDelete_buttonDanger'));
+check('the dialog renders one destructive confirm button', confirm.length === 1);
+confirm[0].props.onClick();
+for (let index = 0; index < 4; index += 1) await new Promise((resolve) => setImmediate(resolve));
+check('confirming calls the Host namespace with the same session', deleteCalls.length === 1 && deleteCalls[0].sessionId === 'session-from-pane' && deleteCalls[0].stopActivity === false);
+check('the caller is told the session is gone', notified === 'session-from-pane');
+check('the pending deletion is cleared afterwards', dialogProps().requestStore.getSnapshot() === null);
 
 let requireProfile;
 try {

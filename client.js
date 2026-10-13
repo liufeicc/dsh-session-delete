@@ -1,7 +1,7 @@
 /**
  * Client half of the session-delete bundle.
  *
- * It contributes two slots and one Remote namespace:
+ * It contributes two slots, one Remote namespace, and one Client service:
  *   - a `sidebar.workspaces.session.menu.item` row (id `session-delete`,
  *     order 500, right after the shipped `archive` row) that asks for
  *     confirmation,
@@ -10,11 +10,17 @@
  *   - the `sessionDelete` Remote namespace of this package's Host half,
  *     mounted through `ctx.remote.$mount` with a hand-written descriptor: the
  *     Host side is a source-mode Service, so an explicitly strict input codec
- *     (the Client mount requirement) carries no schema work.
+ *     (the Client mount requirement) carries no schema work,
+ *   - the `sessionDeleteUi` Client service (`ctx.provide`), which is how another
+ *     Client plugin — today the tiled panel's session dropdown — asks *this*
+ *     dialog to delete a Session instead of re-implementing the confirmation,
+ *     the "stop it first" branch, and the Session-list bookkeeping.
  *
  * After a successful deletion the Client Session list is told about it, so the
  * row disappears immediately instead of waiting for the next baseline pull;
- * the workspace accounting change arrives on the existing Workspace stream.
+ * the workspace accounting change arrives on the existing Workspace stream. A
+ * caller that passed `onDeleted` is notified too, so it can let go of a
+ * Session it was displaying.
  */
 window.__ModuleLoader__.load({
   id: '@local/dsh-session-delete',
@@ -30,6 +36,13 @@ window.__ModuleLoader__.load({
     const OVERLAY_SLOT = 'shell.overlay';
     /** Remote namespace/service key of the Host operation. */
     const SERVICE_KEY = 'sessionDelete';
+    /**
+     * Client service key: the confirmation dialog as seen by other Client
+     * plugins. Deliberately *not* prefixed with `remote.` — it is a local UI
+     * entry point, not a wire endpoint, and the name must not collide with the
+     * Remote namespace service that the Gateway installs for this package.
+     */
+    const UI_SERVICE_KEY = 'sessionDeleteUi';
     /** Locale namespace owned by this plugin. */
     const NS = 'session-delete';
     /** Identity of the injected stylesheet. */
@@ -266,6 +279,18 @@ window.__ModuleLoader__.load({
             if (typeof sessions.handleSessionRemoved === 'function') sessions.handleSessionRemoved(request.sessionId);
             if (typeof sessions.refresh === 'function') Promise.resolve(sessions.refresh()).catch(() => {});
           }
+          /*
+           * 通知发起方（今天的调用方是平铺面板的会话下拉）。放在会话列表之后：
+           * 调用方通常要做的正是「松开这个会话」，而列表已经先一步把它撤了下来。
+           * 回调抛错不影响这次删除 —— 记录在案，然后照常关掉弹窗。
+           */
+          if (typeof request.onDeleted === 'function') {
+            try {
+              request.onDeleted(request.sessionId);
+            } catch (error) {
+              console.error('[session-delete] 删除成功后的回调抛错:', error);
+            }
+          }
           requestStore.set(null);
         }).catch((reason) => {
           setBusy(false);
@@ -351,6 +376,36 @@ window.__ModuleLoader__.load({
       }, 'session-delete: Host namespace');
 
       const requestStore = createSnapshotStore(null);
+
+      /*
+       * 把确认弹窗开放给别的客户端插件。
+       *
+       * 为什么不干脆让调用方自己去调 `remote.sessionDelete`：删除从来不只是「一次远端
+       * 调用」——「正在跑的会话要先停下来再删」「删完要告诉会话列表」「失败原因是哪一类」
+       * 全在这扇窗后面。这是一条**不可恢复**的破坏性操作，实现与确认只该有一份；谁绕过
+       * 它谁就要把上面那几件事重写一遍，而且两份实现迟早会不一致。
+       *
+       * 因此这里只暴露一个入口，形状刻意压到最小：删哪个会话（`sessionId`）、显示什么
+       * 名字（`displayTitle`，可为空）、删成功之后通知谁（`onDeleted`，可选）。
+       * `ctx.provide` 把服务挂在当前 fiber 上，插件卸载时自动反注册；调用方按 Cordis 的
+       * 老规矩在**用的时候** `ctx.get('sessionDeleteUi')` 惰性解析（写进 inject 列表会
+       * 形成先有鸡还是先有蛋）。
+       *
+       * @param call - `{ sessionId, displayTitle?, onDeleted? }`。
+       * @returns 是否受理；`sessionId` 不合法时返回 false，调用方据此报「没准备好」。
+       */
+      ctx.provide(UI_SERVICE_KEY, {
+        request(call) {
+          const sessionId = call === null || typeof call !== 'object' ? undefined : call.sessionId;
+          if (typeof sessionId !== 'string' || sessionId === '') return false;
+          requestStore.set({
+            sessionId,
+            displayTitle: typeof call.displayTitle === 'string' ? call.displayTitle : '',
+            onDeleted: typeof call.onDeleted === 'function' ? call.onDeleted : null,
+          });
+          return true;
+        },
+      });
 
       /**
        * Run the Host deletion and unwrap the Remote result.

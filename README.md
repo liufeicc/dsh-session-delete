@@ -11,6 +11,14 @@ permanently removes one Session.
   right after the shipped `archive` row) in every Session's "…" menu.
 - A `shell.overlay` confirmation dialog naming the Session, because the action is
   irreversible.
+- The `sessionDeleteUi` **Client service** (`ctx.provide`), so another Client plugin
+  can ask for a deletion through this dialog instead of re-implementing it. The
+  first caller is `dsh-split-workspaces`, whose pane session dropdown puts one
+  delete button on every session row. The service is one method:
+  `request({ sessionId, displayTitle, onDeleted })` — it returns `false` for a
+  request without a usable `sessionId`, and `onDeleted(sessionId)` runs after a
+  successful (or already-vanished) deletion, which is how the tiled panel releases
+  the panes that were pinned to that Session.
 - One Host operation, exposed to the browser over the Typert Gateway as the
   Remote endpoint `sessionDelete/delete`.
 
@@ -38,6 +46,10 @@ permanently removes one Session.
   recreates the file being removed.
 - An already-vanished Session resolves as `missing`; the dialog treats that as
   done and clears the stale row.
+- A caller that came in through `sessionDeleteUi` is notified **after** the Client
+  Session list has been told about the removal, and a callback that throws is
+  logged rather than failing the deletion: the log is already gone at that point,
+  so a callback error must not be reported as a failed delete.
 
 ## Notes and limits
 
@@ -73,7 +85,8 @@ permanently removes one Session.
 
 - `index.js` — the Host half: the deletion operation, its refusals, and the
   hand-written Remote binding.
-- `client.js` — the Client half: menu row, confirmation dialog, Remote mount.
+- `client.js` — the Client half: menu row, confirmation dialog, the
+  `sessionDeleteUi` service entry point, Remote mount.
 - `cordis.patch.yml` — inserts the single Host row.
 - `locale/{en,zh}.json` — Plugin Manager display metadata.
 - `icon.svg` — Plugin Manager artwork.
@@ -93,7 +106,10 @@ directories:
   transport), asserting that the namespace becomes visible to `ctx.get` and that
   calls reach the wire as `sessionDelete/delete` with `request.sessionId` and
   `request.stopActivity`. It includes a negative control proving the registry
-  rejects a strict codec without a schema factory.
+  rejects a strict codec without a schema factory. It also drives the
+  `sessionDeleteUi` service the way a sibling plugin does — refused empty request,
+  accepted real one, the dialog rendered from the store it wrote, its destructive
+  button pressed — and asserts the Host call and the `onDeleted` notification.
 - `node test/host-endpoint.mjs` — drives the **real** Host Gateway's `invoke()`
   against the real registry, so the hand-written SRC discovery path is exercised
   for the plain, missing, refused-running, and stop-and-delete cases, and the
